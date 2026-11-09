@@ -32,10 +32,26 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
+  // Enforce single instance for the background notch on Windows
+  HANDLE single_instance_mutex = nullptr;
+  if (!is_settings) {
+    single_instance_mutex = ::CreateMutexW(nullptr, TRUE, L"Local\\MAX_Notch_SingleInstance_Mutex");
+    if (::GetLastError() == ERROR_ALREADY_EXISTS) {
+      if (single_instance_mutex) {
+        ::CloseHandle(single_instance_mutex);
+      }
+      return EXIT_SUCCESS;
+    }
+  }
+
   FlutterWindow window(project, is_settings);
   const wchar_t* title = is_settings ? L"MAX - Configuración" : L"MAX";
 
   if (!window.Create(title, is_settings)) {
+    if (single_instance_mutex) {
+      ::ReleaseMutex(single_instance_mutex);
+      ::CloseHandle(single_instance_mutex);
+    }
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
@@ -44,6 +60,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   while (::GetMessage(&msg, nullptr, 0, 0)) {
     ::TranslateMessage(&msg);
     ::DispatchMessage(&msg);
+  }
+
+  if (single_instance_mutex) {
+    ::ReleaseMutex(single_instance_mutex);
+    ::CloseHandle(single_instance_mutex);
   }
 
   ::CoUninitialize();

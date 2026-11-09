@@ -500,11 +500,32 @@ class _MaxNotchShellState extends State<MaxNotchShell>
     _matrixPulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 700),
-    )..repeat(reverse: true);
+    );
 
     _bridge.addListener(_onBridgeUpdate);
     _bridge.initialize();
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncInputRegion());
+  }
+
+  void _updatePulseAnimation() {
+    if (_mode == NotchMode.transferring) {
+      if (!_matrixPulseController.isAnimating) {
+        _matrixPulseController.repeat(reverse: true);
+      }
+    } else {
+      if (_matrixPulseController.isAnimating) {
+        _matrixPulseController.stop();
+        _matrixPulseController.reset();
+      }
+    }
+  }
+
+  void _setMode(NotchMode targetMode, {NotchMode? activeContentMode}) {
+    _mode = targetMode;
+    if (activeContentMode != null) {
+      _activeContentMode = activeContentMode;
+    }
+    _updatePulseAnimation();
   }
 
   @override
@@ -530,8 +551,7 @@ class _MaxNotchShellState extends State<MaxNotchShell>
     _autoHideTimer?.cancel();
     _hoverHoldController.reset();
     setState(() {
-      _mode = targetMode;
-      _activeContentMode = targetMode;
+      _setMode(targetMode, activeContentMode: targetMode);
     });
     _syncInputRegion();
     _morphController.forward();
@@ -540,7 +560,7 @@ class _MaxNotchShellState extends State<MaxNotchShell>
   void _closePanelToIdle() {
     if (_mode == NotchMode.idle) return;
     setState(() {
-      _mode = NotchMode.idle;
+      _setMode(NotchMode.idle);
     });
     _morphController.reverse();
   }
@@ -711,8 +731,7 @@ class _MaxNotchShellState extends State<MaxNotchShell>
       _transferPartnerName = target.alias;
       _transferProgress = 0.0;
       _transferSpeedMbps = 0.0;
-      _mode = NotchMode.transferring;
-      _activeContentMode = NotchMode.transferring;
+      _setMode(NotchMode.transferring, activeContentMode: NotchMode.transferring);
     });
     _syncInputRegion();
 
@@ -751,8 +770,7 @@ class _MaxNotchShellState extends State<MaxNotchShell>
       _transferFilesCompleted = 0;
       _isPartialTransfer = false;
       _bridge.activeIncomingRequest = null;
-      _mode = NotchMode.transferring;
-      _activeContentMode = NotchMode.transferring;
+      _setMode(NotchMode.transferring, activeContentMode: NotchMode.transferring);
     });
     _syncInputRegion();
   }
@@ -824,8 +842,7 @@ class _MaxNotchShellState extends State<MaxNotchShell>
             ? customMessage
             : 'CANCELADA O INTERRUMPIDA';
       }
-      _mode = NotchMode.completed;
-      _activeContentMode = NotchMode.completed;
+      _setMode(NotchMode.completed, activeContentMode: NotchMode.completed);
     });
     _syncInputRegion();
     _morphController.forward();
@@ -837,8 +854,7 @@ class _MaxNotchShellState extends State<MaxNotchShell>
         if (!mounted) return;
         if (_isCursorInside && _stagedFiles.isNotEmpty) {
           setState(() {
-            _mode = NotchMode.staging;
-            _activeContentMode = NotchMode.staging;
+            _setMode(NotchMode.staging, activeContentMode: NotchMode.staging);
           });
           _syncInputRegion();
         } else {

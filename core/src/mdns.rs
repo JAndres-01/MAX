@@ -46,28 +46,8 @@ pub fn spawn_mdns_publisher(state: Arc<AppState>) {
             let ip_changed = !current_ip.is_empty() && current_ip != last_published_ip;
             let config_changed = !alias.is_empty() && (alias != last_published_alias || port != last_published_port);
             
-            // Check if published processes exited unexpectedly
-            let child1_dead = match &mut active_child1 {
-                Some(c) => c.try_wait().ok().flatten().is_some(),
-                None => false,
-            };
-            let child2_dead = match &mut active_child2 {
-                Some(c) => c.try_wait().ok().flatten().is_some(),
-                None => false,
-            };
-            let child3_dead = match &mut active_child3 {
-                Some(c) => c.try_wait().ok().flatten().is_some(),
-                None => false,
-            };
-            let child4_dead = match &mut active_child4 {
-                Some(c) => c.try_wait().ok().flatten().is_some(),
-                None => false,
-            };
-
-            if !current_ip.is_empty() && (ip_changed || config_changed || child1_dead || child2_dead || child3_dead || child4_dead) {
-                if ip_changed || config_changed {
-                    info!("Publishing mDNS: hyprand.local, synapsedrop.local & _localsend._tcp ({}:{}) -> {}", alias, port, current_ip);
-                }
+            if !current_ip.is_empty() && (ip_changed || config_changed) {
+                info!("Publishing mDNS: hyprand.local, synapsedrop.local & _localsend._tcp ({}:{}) -> {}", alias, port, current_ip);
 
                 // Terminate previous publisher processes cleanly
                 if let Some(mut child) = active_child1.take() {
@@ -82,9 +62,6 @@ pub fn spawn_mdns_publisher(state: Arc<AppState>) {
                 if let Some(mut child4) = active_child4.take() {
                     let _ = child4.kill().await;
                 }
-
-                // Clean up any orphaned avahi-publish processes from prior runs
-                let _ = Command::new("killall").arg("avahi-publish").status().await;
 
                 // Brief grace period for Avahi DBus to unregister previous entries
                 tokio::time::sleep(Duration::from_millis(250)).await;
