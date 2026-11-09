@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
@@ -46,6 +47,7 @@ enum MaxIconType {
   arrowDownLeft,
   check,
   error,
+  settings,
 }
 
 class _FileTypeVisual {
@@ -413,6 +415,11 @@ class _MaxNotchShellState extends State<MaxNotchShell>
 
   void _scheduleQueueFadeCheck() {
     WidgetsBinding.instance.addPostFrameCallback((_) => _updateQueueEdgeFades());
+  }
+
+  void _openSettings() {
+    final exe = Platform.resolvedExecutable;
+    unawaited(Process.run(exe, ['--settings']));
   }
 
   void _syncInputRegion() {
@@ -1283,6 +1290,33 @@ class _MaxNotchShellState extends State<MaxNotchShell>
                       ),
                     )
                   : const SizedBox.shrink(key: ValueKey('header_queue_empty')),
+            ),
+            const SizedBox(width: 8),
+            MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: _openSettings,
+                child: Tooltip(
+                  message: 'Ajustes',
+                  child: Container(
+                    width: 24,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.06),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.12),
+                      ),
+                    ),
+                    alignment: Alignment.center,
+                    child: _MaxVectorIcon(
+                      type: MaxIconType.settings,
+                      size: 13,
+                      color: Colors.white.withValues(alpha: 0.70),
+                    ),
+                  ),
+                ),
+              ),
             ),
           ],
         ),
@@ -2513,6 +2547,26 @@ class _MaxVectorIconPainter extends CustomPainter {
           Offset(w * 0.24, h * 0.76),
           stroke,
         );
+        break;
+
+      case MaxIconType.settings:
+        stroke.strokeWidth = 1.5;
+        canvas.drawCircle(Offset(w * 0.5, h * 0.5), w * 0.20, stroke);
+        final spokePaint = Paint()
+          ..color = color
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.6
+          ..strokeCap = StrokeCap.round;
+        for (int i = 0; i < 6; i++) {
+          final double angle = i * 3.141592653589793 / 3.0;
+          final double cosA = math.cos(angle);
+          final double sinA = math.sin(angle);
+          canvas.drawLine(
+            Offset(w * 0.5 + cosA * (w * 0.27), h * 0.5 + sinA * (h * 0.27)),
+            Offset(w * 0.5 + cosA * (w * 0.43), h * 0.5 + sinA * (h * 0.43)),
+            spokePaint,
+          );
+        }
         break;
     }
   }
