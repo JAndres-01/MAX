@@ -1189,7 +1189,7 @@ class _MaxNotchShellState extends State<MaxNotchShell>
                     ),
                   ),
                   const SizedBox(width: 10),
-                  Flexible(
+                  Expanded(
                     child: AnimatedSwitcher(
                       duration: const Duration(milliseconds: 140),
                       child: Text(
@@ -1918,7 +1918,7 @@ class _MaxNotchShellState extends State<MaxNotchShell>
                     color: Colors.white,
                   ),
                   const SizedBox(width: 8),
-                  Flexible(
+                  Expanded(
                     child: Text(
                       label,
                       maxLines: 1,

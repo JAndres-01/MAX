@@ -178,7 +178,7 @@ static void my_application_activate(GApplication* application) {
     GtkCssProvider* css_provider = gtk_css_provider_new();
     gtk_css_provider_load_from_data(
         css_provider,
-        "window, .background { background-color: rgba(0, 0, 0, 0); "
+        "window, .background, view { background-color: rgba(0, 0, 0, 0); "
         "background: transparent; border: none; box-shadow: none; }",
         -1, nullptr);
     GdkScreen* rgba_screen = gtk_window_get_screen(window);
@@ -201,11 +201,9 @@ static void my_application_activate(GApplication* application) {
 
   FlView* view = fl_view_new(project);
   self->view = view;
-  GdkRGBA background_color;
+  GdkRGBA background_color = {0.0, 0.0, 0.0, 0.0};
   if (self->is_settings_mode) {
     gdk_rgba_parse(&background_color, "#0D0D10");
-  } else {
-    gdk_rgba_parse(&background_color, "#00000000");
   }
   fl_view_set_background_color(view, &background_color);
   gtk_widget_show(GTK_WIDGET(view));
