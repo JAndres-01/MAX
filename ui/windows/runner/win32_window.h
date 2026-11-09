@@ -35,6 +35,7 @@ class Win32Window {
   // as appropriate for the default monitor. The window is invisible until
   // |Show| is called. Returns true if the window was created successfully.
   bool Create(const std::wstring& title, const Point& origin, const Size& size);
+  bool Create(const std::wstring& title, bool is_settings = false);
 
   // Show the current window. Returns true if the window was successfully shown.
   bool Show();

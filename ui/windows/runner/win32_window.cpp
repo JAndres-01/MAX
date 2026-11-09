@@ -149,6 +149,53 @@ bool Win32Window::Create(const std::wstring& title,
   return OnCreate();
 }
 
+bool Win32Window::Create(const std::wstring& title, bool is_settings) {
+  Destroy();
+
+  const wchar_t* window_class =
+      WindowClassRegistrar::GetInstance()->GetWindowClass();
+
+  // Find the primary monitor to place the notch or settings
+  POINT pt = {0, 0};
+  HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+  MONITORINFO mi = { sizeof(mi) };
+  GetMonitorInfo(monitor, &mi);
+
+  UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
+  double scale_factor = dpi / 96.0;
+
+  int mon_x = mi.rcMonitor.left;
+  int mon_y = mi.rcMonitor.top;
+  int mon_w = mi.rcMonitor.right - mi.rcMonitor.left;
+  int mon_h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+
+  int logical_w = is_settings ? 820 : 500;
+  int logical_h = is_settings ? 580 : 240;
+
+  int win_w = static_cast<int>(logical_w * scale_factor);
+  int win_h = static_cast<int>(logical_h * scale_factor);
+
+  // Position exactly at the horizontal center of the monitor
+  int win_x = mon_x + (mon_w - win_w) / 2;
+  int win_y = is_settings ? (mon_y + (mon_h - win_h) / 2) : mon_y;
+
+  DWORD ex_style = is_settings ? WS_EX_APPWINDOW : (WS_EX_TOPMOST | WS_EX_TOOLWINDOW);
+  DWORD style = is_settings ? WS_OVERLAPPEDWINDOW : WS_POPUP;
+
+  HWND window = CreateWindowEx(
+      ex_style, window_class, title.c_str(), style,
+      win_x, win_y, win_w, win_h,
+      nullptr, nullptr, GetModuleHandle(nullptr), this);
+
+  if (!window) {
+    return false;
+  }
+
+  UpdateTheme(window);
+
+  return OnCreate();
+}
+
 bool Win32Window::Show() {
   return ShowWindow(window_handle_, SW_SHOWNORMAL);
 }

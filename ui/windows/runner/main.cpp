@@ -33,20 +33,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
   FlutterWindow window(project, is_settings);
-  int screen_width = ::GetSystemMetrics(SM_CXSCREEN);
-  int screen_height = ::GetSystemMetrics(SM_CYSCREEN);
-
-  Win32Window::Point origin = is_settings
-      ? Win32Window::Point((screen_width - 820) / 2, (screen_height - 580) / 2)
-      : Win32Window::Point((screen_width - 500) / 2, 0);
-
-  Win32Window::Size size = is_settings
-      ? Win32Window::Size(820, 580)
-      : Win32Window::Size(500, 240);
-
   const wchar_t* title = is_settings ? L"MAX - Configuración" : L"MAX";
 
-  if (!window.Create(title, origin, size)) {
+  if (!window.Create(title, is_settings)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);

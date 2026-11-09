@@ -93,9 +93,19 @@ void FlutterWindow::SetInputRegion(int width, int height) {
   UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
   double scale_factor = dpi / 96.0;
 
-  int canvas_w = static_cast<int>(500 * scale_factor);
+  RECT client_rect{};
+  GetClientRect(hwnd, &client_rect);
+  int canvas_w = client_rect.right - client_rect.left;
+  if (canvas_w <= 0) {
+    canvas_w = static_cast<int>(500 * scale_factor);
+  }
+
   int clamped_w = static_cast<int>((width > 500 ? 500 : (width < 40 ? 40 : width)) * scale_factor);
   int clamped_h = static_cast<int>((height > 240 ? 240 : (height < 8 ? 8 : height)) * scale_factor);
+  if (clamped_w > canvas_w) {
+    clamped_w = canvas_w;
+  }
+
   int offset_x = (canvas_w - clamped_w) / 2;
 
   // Clip the window region so only the Notch bar receives mouse clicks;
@@ -130,6 +140,23 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   switch (message) {
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
+      break;
+    case WM_DPICHANGED:
+      if (!is_settings_) {
+        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
+        double scale_factor = dpi / 96.0;
+        MONITORINFO mi = { sizeof(mi) };
+        GetMonitorInfo(monitor, &mi);
+        int mon_w = mi.rcMonitor.right - mi.rcMonitor.left;
+        int win_w = static_cast<int>(500 * scale_factor);
+        int win_h = static_cast<int>(240 * scale_factor);
+        int win_x = mi.rcMonitor.left + (mon_w - win_w) / 2;
+        int win_y = mi.rcMonitor.top;
+        SetWindowPos(hwnd, nullptr, win_x, win_y, win_w, win_h, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetInputRegion(240, 24);
+        return 0;
+      }
       break;
   }
 
