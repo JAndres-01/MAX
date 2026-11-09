@@ -414,8 +414,8 @@ class _MaxNotchShellState extends State<MaxNotchShell>
   }
 
   void _syncInputRegion() {
-    int width = 220;
-    int height = 18;
+    int width = 240;
+    int height = 24;
 
     if (_mode != NotchMode.idle || _morphController.value > 0.01) {
       final effective = _mode == NotchMode.idle ? _activeContentMode : _mode;
@@ -437,8 +437,8 @@ class _MaxNotchShellState extends State<MaxNotchShell>
           height = 102;
           break;
         case NotchMode.idle:
-          width = 220;
-          height = 18;
+          width = 240;
+          height = 24;
           break;
       }
     }
@@ -940,8 +940,8 @@ class _MaxNotchShellState extends State<MaxNotchShell>
 
     if (morphT <= 0.001 && _mode == NotchMode.idle) {
       return Container(
-        width: 220,
-        height: 18,
+        width: 240,
+        height: 24,
         alignment: Alignment.topCenter,
         color: Colors.transparent,
         child: _buildTopStripSpine(isExpanded: false),

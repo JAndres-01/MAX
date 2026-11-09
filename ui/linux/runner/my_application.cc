@@ -77,8 +77,8 @@ static void method_call_cb(FlMethodChannel* channel,
 
   if (g_strcmp0(method, "setInputRegion") == 0) {
     FlValue* args = fl_method_call_get_args(method_call);
-    int width = 220;
-    int height = 18;
+    int width = 240;
+    int height = 24;
     if (fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
       FlValue* w_val = fl_value_lookup_string(args, "width");
       FlValue* h_val = fl_value_lookup_string(args, "height");
@@ -146,8 +146,8 @@ static void my_application_activate(GApplication* application) {
       gtk_widget_set_visual(GTK_WIDGET(window), visual);
     }
   } else {
-    self->active_input_width = 220;
-    self->active_input_height = 18;
+    self->active_input_width = 240;
+    self->active_input_height = 24;
 
     // Wayland Layer Shell setup: true top-center floating hardware notch
     if (gtk_layer_is_supported()) {
