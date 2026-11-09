@@ -45,8 +45,8 @@ bool FlutterWindow::OnCreate() {
         if (call.method_name().compare("setInputRegion") == 0) {
           const auto* arguments = std::get_if<flutter::EncodableMap>(call.arguments());
           if (arguments) {
-            int width = 220;
-            int height = 18;
+            int width = 240;
+            int height = 24;
             auto width_it = arguments->find(flutter::EncodableValue("width"));
             if (width_it != arguments->end()) {
               if (std::holds_alternative<int>(width_it->second)) {
@@ -70,7 +70,7 @@ bool FlutterWindow::OnCreate() {
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
     if (!is_settings_) {
-      SetInputRegion(220, 18);
+      SetInputRegion(240, 24);
     }
   });
 
