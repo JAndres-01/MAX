@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
@@ -40,21 +41,20 @@ class SoundEngine {
       if (!wavFile.existsSync()) return;
 
       if (Platform.isLinux) {
-        // Fast spawn without waiting for completion
+        // Fast asynchronous execution with automated reaping to prevent defunct zombie processes
         if (File('/usr/bin/pw-play').existsSync()) {
-          Process.start('/usr/bin/pw-play', [wavPath], mode: ProcessStartMode.detached);
+          unawaited(Process.run('/usr/bin/pw-play', [wavPath]));
         } else if (File('/usr/bin/paplay').existsSync()) {
-          Process.start('/usr/bin/paplay', [wavPath], mode: ProcessStartMode.detached);
+          unawaited(Process.run('/usr/bin/paplay', [wavPath]));
         } else if (File('/usr/bin/aplay').existsSync()) {
-          Process.start('/usr/bin/aplay', ['-q', wavPath], mode: ProcessStartMode.detached);
+          unawaited(Process.run('/usr/bin/aplay', ['-q', wavPath]));
         }
       } else if (Platform.isWindows) {
         // Windows Media SoundPlayer via PowerShell async background
-        Process.start(
+        unawaited(Process.run(
           'powershell',
-          ['-c', "(New-Object Media.SoundPlayer '$wavPath').PlaySync()"],
-          mode: ProcessStartMode.detached,
-        );
+          ['-NoProfile', '-NonInteractive', '-c', "(New-Object Media.SoundPlayer '$wavPath').PlaySync()"],
+        ));
       }
     } catch (e) {
       debugPrint('SoundEngine notice: $e');

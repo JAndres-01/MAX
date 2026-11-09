@@ -255,6 +255,7 @@ pub async fn start_discovery(state: Arc<AppState>) -> Result<(), Box<dyn std::er
                 };
                 tokio::spawn(async move {
                     let url = format!("{}://{}:{}/api/localsend/v2/register", peer.protocol, peer.ip, peer.port);
+                    let mut probe_ok = false;
                     if let Ok(resp) = client.post(&url).json(&my_dto_clone).send().await {
                         if resp.status().is_success() {
                             if let Ok(peer_dto) = resp.json::<DeviceDto>().await {
@@ -270,13 +271,17 @@ pub async fn start_discovery(state: Arc<AppState>) -> Result<(), Box<dyn std::er
                                     last_seen: 0,
                                 };
                                 state_clone.add_or_update_peer(updated_peer).await;
+                                probe_ok = true;
                             }
                         }
+                    }
+                    if !probe_ok {
+                        state_clone.record_peer_probe_failure(&peer.fingerprint).await;
                     }
                 });
             }
 
-            beacon_state.clean_stale_peers(60).await;
+            beacon_state.clean_stale_peers(6).await;
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });

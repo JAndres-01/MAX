@@ -99,6 +99,7 @@ pub struct ActiveSession {
 pub struct AppState {
     pub config: RwLock<AppConfig>,
     pub peers: RwLock<HashMap<String, PeerDevice>>, // IP/fingerprint -> PeerDevice
+    pub peer_failures: RwLock<HashMap<String, u32>>, // fingerprint -> consecutive failed probes
     pub active_sessions: RwLock<HashMap<String, ActiveSession>>,
     pub active_send_abort: RwLock<Option<tokio::task::AbortHandle>>,
     pub transfer_history: RwLock<Vec<TransferHistoryItem>>,
@@ -117,6 +118,7 @@ impl AppState {
         Self {
             config: RwLock::new(config),
             peers: RwLock::new(HashMap::new()),
+            peer_failures: RwLock::new(HashMap::new()),
             active_sessions: RwLock::new(HashMap::new()),
             active_send_abort: RwLock::new(None),
             transfer_history: RwLock::new(history),
@@ -178,13 +180,47 @@ impl AppState {
             .as_secs();
         peer.last_seen = now;
 
-        let mut peers = self.peers.write().await;
-        // Key by fingerprint so each unique physical device is recorded only once!
-        peers.insert(peer.fingerprint.clone(), peer);
+        // Clear any previous failure count since device is actively responsive
+        self.peer_failures.write().await.remove(&peer.fingerprint);
 
-        let peers_list: Vec<PeerDevice> = peers.values().cloned().collect();
-        drop(peers);
-        let _ = self.event_tx.send(IpcEvent::PeersUpdated(peers_list));
+        let mut peers = self.peers.write().await;
+        let mut emit_event = true;
+        if let Some(existing) = peers.get_mut(&peer.fingerprint) {
+            if existing.ip == peer.ip
+                && existing.port == peer.port
+                && existing.alias == peer.alias
+                && existing.device_model == peer.device_model
+                && existing.protocol == peer.protocol
+                && existing.download == peer.download
+            {
+                existing.last_seen = now;
+                emit_event = false;
+            }
+        }
+
+        if emit_event {
+            peers.insert(peer.fingerprint.clone(), peer);
+            let peers_list: Vec<PeerDevice> = peers.values().cloned().collect();
+            drop(peers);
+            let _ = self.event_tx.send(IpcEvent::PeersUpdated(peers_list));
+        }
+    }
+
+    pub async fn record_peer_probe_failure(&self, fingerprint: &str) {
+        let mut failures = self.peer_failures.write().await;
+        let count = failures.entry(fingerprint.to_string()).or_insert(0);
+        *count += 1;
+        if *count >= 2 {
+            failures.remove(fingerprint);
+            drop(failures);
+
+            let mut peers = self.peers.write().await;
+            if peers.remove(fingerprint).is_some() {
+                let peers_list: Vec<PeerDevice> = peers.values().cloned().collect();
+                drop(peers);
+                let _ = self.event_tx.send(IpcEvent::PeersUpdated(peers_list));
+            }
+        }
     }
 
     pub async fn clean_stale_peers(&self, ttl_seconds: u64) {
@@ -198,6 +234,10 @@ impl AppState {
         peers.retain(|_, p| now.saturating_sub(p.last_seen) < ttl_seconds);
 
         if peers.len() != original_len {
+            let mut failures = self.peer_failures.write().await;
+            failures.retain(|k, _| peers.contains_key(k));
+            drop(failures);
+
             let peers_list: Vec<PeerDevice> = peers.values().cloned().collect();
             drop(peers);
             let _ = self.event_tx.send(IpcEvent::PeersUpdated(peers_list));

@@ -11,6 +11,8 @@ import 'settings_main.dart';
 
 void main(List<String> args) {
   WidgetsFlutterBinding.ensureInitialized();
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 12 * 1024 * 1024;
+  PaintingBinding.instance.imageCache.maximumSize = 25;
   if (args.contains('--settings')) {
     runApp(const MaxSettingsApp());
   } else {

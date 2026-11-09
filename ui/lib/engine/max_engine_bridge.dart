@@ -338,7 +338,11 @@ class MaxEngineBridge extends ChangeNotifier {
   void initialize({bool isSettingsMode = false}) {
     if (!isSettingsMode) {
       _startEmbeddedRustCore();
-      _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) => fetchPeers());
+      _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+        if (_wsChannel == null) {
+          fetchPeers();
+        }
+      });
     }
     _connectEventStream();
     fetchConfig();
