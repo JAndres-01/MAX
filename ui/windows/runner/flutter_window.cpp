@@ -71,8 +71,14 @@ bool FlutterWindow::OnCreate() {
     this->Show();
     if (!is_settings_) {
       SetInputRegion(240, 24);
+      ::SetWindowPos(GetHandle(), HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }
   });
+
+  if (!is_settings_ && hwnd) {
+    ::SetTimer(hwnd, 1001, 1500, nullptr);
+  }
 
   flutter_controller_->ForceRedraw();
 
@@ -113,9 +119,17 @@ void FlutterWindow::SetInputRegion(int width, int height) {
   int radius = static_cast<int>(18 * scale_factor);
   HRGN rgn = CreateRoundRectRgn(offset_x, 0, offset_x + clamped_w, clamped_h, radius, radius);
   SetWindowRgn(hwnd, rgn, TRUE);
+
+  // Keep topmost active after region adjustment
+  ::SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 void FlutterWindow::OnDestroy() {
+  if (!is_settings_ && GetHandle()) {
+    ::KillTimer(GetHandle(), 1001);
+  }
+
   window_channel_ = nullptr;
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
@@ -141,6 +155,28 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;
+    case WM_TIMER:
+      if (wparam == 1001 && !is_settings_) {
+        ::SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+      }
+      break;
+    case WM_ACTIVATE:
+    case WM_ACTIVATEAPP:
+      if (!is_settings_) {
+        ::SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+      }
+      break;
+    case WM_WINDOWPOSCHANGING:
+      if (!is_settings_) {
+        WINDOWPOS* wp = reinterpret_cast<WINDOWPOS*>(lparam);
+        if (wp) {
+          wp->hwndInsertAfter = HWND_TOPMOST;
+          wp->flags &= ~SWP_NOZORDER;
+        }
+      }
+      break;
     case WM_DPICHANGED:
       if (!is_settings_) {
         HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -153,7 +189,7 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
         int win_h = static_cast<int>(240 * scale_factor);
         int win_x = mi.rcMonitor.left + (mon_w - win_w) / 2;
         int win_y = mi.rcMonitor.top;
-        SetWindowPos(hwnd, nullptr, win_x, win_y, win_w, win_h, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(hwnd, HWND_TOPMOST, win_x, win_y, win_w, win_h, SWP_NOACTIVATE);
         SetInputRegion(240, 24);
         return 0;
       }
