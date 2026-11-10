@@ -6,24 +6,34 @@ use tracing::info;
 
 slint::include_modules!();
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
-    info!("Starting MAX Native Notch (Nusa-style)");
+    println!("[MAX] Iniciando MAX Notch...");
 
-    // Initialize LocalSend core state
-    let config = max_core::config::AppConfig::load();
-    let _state = Arc::new(max_core::state::AppState::new(config));
+    // Initialize LocalSend core runtime in a dedicated background thread pool
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    let _core_handle = rt.spawn(async {
+        let config = max_core::config::AppConfig::load();
+        let _state = Arc::new(max_core::state::AppState::new(config));
+        info!("MAX Core background engine active");
+    });
 
     let window = NotchWindow::new()?;
-    window.set_peer_count(2);
-    window.set_active_peer_name("Pixel 8 Pro".into());
+    println!("[MAX] Ventana creada con éxito. Mostrando en pantalla...");
+
+    // Initial mock data to preview Nusa aesthetics
+    window.set_peer_count(3);
+    window.set_active_peer_name("Pixel 8 Pro (LocalSend)".into());
+    window.set_is_expanded(true);
 
     window.on_send_files({
         let win = window.as_weak();
         move || {
             if let Some(w) = win.upgrade() {
-                info!("Sending files to peer: {}", w.get_active_peer_name());
+                println!("[MAX] Click en Enviar hacia: {}", w.get_active_peer_name());
             }
         }
     });
@@ -32,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let win = window.as_weak();
         move || {
             if let Some(w) = win.upgrade() {
-                info!("Clearing staged files");
+                println!("[MAX] Cola de archivos limpiada");
                 w.set_staged_files(slint::ModelRc::new(slint::VecModel::default()));
             }
         }
