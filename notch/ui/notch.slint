@@ -1,0 +1,257 @@
+import { Button } from "std-widgets.slint";
+
+export struct PeerItem {
+    alias: string,
+    device_type: string,
+    ip: string,
+    port: int,
+}
+
+export struct StagedFile {
+    name: string,
+    size_formatted: string,
+    ext_tag: string,
+}
+
+export component NotchWindow inherits Window {
+    title: "MAX Notch";
+    no-frame: true;
+    background: transparent;
+    always-on-top: true;
+
+    in-out property <bool> is-expanded: false;
+    in-out property <bool> is-hovered: false;
+    in-out property <bool> is-transferring: false;
+    in-out property <float> transfer-progress: 0.0;
+    in-out property <string> transfer-speed: "0.0 MB/s";
+    in-out property <string> active-peer-name: "Buscando dispositivos...";
+    in-out property <int> peer-count: 0;
+    in-out property <int> selected-peer-index: 0;
+    in-out property <[PeerItem]> peers: [];
+    in-out property <[StagedFile]> staged-files: [];
+
+    callback toggle-expanded();
+    callback select-peer(int);
+    callback send-files();
+    callback clear-staged();
+
+    width: is-expanded ? 460px : 180px;
+    height: is-expanded ? 210px : 30px;
+
+    animate width { duration: 240ms; easing: cubic-bezier(0.16, 1.0, 0.3, 1.0); }
+    animate height { duration: 240ms; easing: cubic-bezier(0.16, 1.0, 0.3, 1.0); }
+
+    // Outer notch container
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #0E0E12F0; // 94% obsidian glass
+        border-radius: is-expanded ? 16px : 14px;
+        border-width: 1px;
+        border-color: root.is-hovered ? #FFFFFF38 : #FFFFFF1F;
+
+        animate border-color { duration: 150ms; }
+
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            mouse-cursor: pointer;
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down && !root.is-expanded) {
+                    root.is-expanded = true;
+                }
+            }
+        }
+
+        // --- IDLE BAR CONTENT (When collapsed) ---
+        if !root.is-expanded: HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 14px;
+            alignment: space-between;
+
+            HorizontalLayout {
+                spacing: 7px;
+                alignment: start;
+
+                // Glowing pulse dot
+                Rectangle {
+                    y: 10px;
+                    width: 7px;
+                    height: 7px;
+                    border-radius: 3.5px;
+                    background: root.peer-count > 0 ? #34D399 : #9CA3AF;
+                }
+
+                Text {
+                    text: root.peer-count > 0 ? "\{root.peer-count} en red" : "MAX";
+                    color: #FFFFFFE6;
+                    font-size: 11px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+            }
+
+            Text {
+                text: "▼";
+                color: #FFFFFF66;
+                font-size: 9px;
+                vertical-alignment: center;
+            }
+        }
+
+        // --- EXPANDED NUSA-STYLE CONTENT ---
+        if root.is-expanded: VerticalLayout {
+            padding: 14px;
+            spacing: 12px;
+
+            // Header: Peer selector + Close button
+            HorizontalLayout {
+                alignment: space-between;
+                height: 28px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 26px;
+                        height: 26px;
+                        border-radius: 6px;
+                        background: #1C1C24;
+                        border-width: 1px;
+                        border-color: #FFFFFF26;
+
+                        Text {
+                            text: "📱";
+                            font-size: 13px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 1px;
+
+                        Text {
+                            text: root.active-peer-name;
+                            color: #FFFFFFF2;
+                            font-size: 12px;
+                            font-weight: 700;
+                        }
+
+                        // Nusa-style microdots indicators
+                        HorizontalLayout {
+                            spacing: 4px;
+                            alignment: start;
+                            for i in root.peer-count: Rectangle {
+                                width: (i == root.selected-peer-index) ? 14px : 5px;
+                                height: 4px;
+                                border-radius: 2px;
+                                background: (i == root.selected-peer-index) ? #60A5FA : #FFFFFF40;
+                                animate width { duration: 150ms; }
+                            }
+                        }
+                    }
+                }
+
+                // Collapse button
+                TouchArea {
+                    width: 24px;
+                    height: 24px;
+                    clicked => {
+                        root.is-expanded = false;
+                    }
+
+                    Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        border-radius: 12px;
+                        background: #FFFFFF14;
+
+                        Text {
+                            text: "▲";
+                            color: #FFFFFFAA;
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // Middle: File Queue / Drop Zone
+            Rectangle {
+                height: 80px;
+                background: #14141AF0;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: #FFFFFF14;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+
+                    Text {
+                        text: root.staged-files.length > 0 ? "\{root.staged-files.length} archivos preparados" : "Arrastra archivos aquí";
+                        color: #FFFFFFE0;
+                        font-size: 12px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                    }
+
+                    Text {
+                        text: root.staged-files.length > 0 ? "Listos para enviar por Wi-Fi directo" : "o haz clic para explorar en el equipo";
+                        color: #FFFFFF80;
+                        font-size: 10px;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
+            // Bottom action row: Send Button & Clear
+            HorizontalLayout {
+                alignment: space-between;
+                height: 32px;
+
+                TouchArea {
+                    width: 70px;
+                    clicked => { root.clear-staged(); }
+                    Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        border-radius: 7px;
+                        background: #FFFFFF12;
+                        Text {
+                            text: "Limpiar";
+                            color: #FFFFFF99;
+                            font-size: 11px;
+                            font-weight: 500;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                TouchArea {
+                    width: 140px;
+                    clicked => { root.send-files(); }
+                    Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        border-radius: 7px;
+                        background: #2563EB;
+                        Text {
+                            text: "Enviar archivo ➔";
+                            color: #FFFFFF;
+                            font-size: 11px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
