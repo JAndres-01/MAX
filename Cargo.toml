@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "core",
+    "notch",
+]
+resolver = "2"
