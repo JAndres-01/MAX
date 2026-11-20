@@ -1,8 +1,10 @@
 #include "flutter_window.h"
 
 #include <dwmapi.h>
+#include <mmsystem.h>
 #include <flutter_windows.h>
 #include <optional>
+#include <string>
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -62,6 +64,34 @@ bool FlutterWindow::OnCreate() {
             SetInputRegion(width, height);
           }
           result->Success();
+        } else if (call.method_name().compare("playSound") == 0) {
+          const auto* arguments = std::get_if<flutter::EncodableMap>(call.arguments());
+          if (arguments) {
+            auto path_it = arguments->find(flutter::EncodableValue("path"));
+            if (path_it != arguments->end()) {
+              if (const auto* path_str = std::get_if<std::string>(&path_it->second)) {
+                if (!path_str->empty()) {
+                  int wide_len = ::MultiByteToWideChar(
+                      CP_UTF8, 0, path_str->data(), static_cast<int>(path_str->size()),
+                      nullptr, 0);
+                  if (wide_len > 0) {
+                    std::wstring wide_path(static_cast<size_t>(wide_len), L'\0');
+                    ::MultiByteToWideChar(
+                        CP_UTF8, 0, path_str->data(), static_cast<int>(path_str->size()),
+                        wide_path.data(), wide_len);
+                    ::PlaySoundW(wide_path.c_str(), nullptr,
+                                 SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+                  }
+                }
+              }
+            }
+          }
+          result->Success();
+        } else if (call.method_name().compare("trimMemory") == 0) {
+          ::SetProcessWorkingSetSize(::GetCurrentProcess(),
+                                     static_cast<SIZE_T>(-1),
+                                     static_cast<SIZE_T>(-1));
+          result->Success();
         } else {
           result->NotImplemented();
         }
@@ -97,6 +127,12 @@ void FlutterWindow::SetInputRegion(int width, int height) {
   // Calculate physical DPI scaling factor
   HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
   UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
+  if (width == last_input_width_ && height == last_input_height_ && dpi == last_input_dpi_) {
+    return;
+  }
+  last_input_width_ = width;
+  last_input_height_ = height;
+  last_input_dpi_ = dpi;
   double scale_factor = dpi / 96.0;
 
   RECT client_rect{};
@@ -118,7 +154,11 @@ void FlutterWindow::SetInputRegion(int width, int height) {
   // all other areas of the 500x240 canvas pass clicks through to windows underneath.
   int radius = static_cast<int>(18 * scale_factor);
   HRGN rgn = CreateRoundRectRgn(offset_x, 0, offset_x + clamped_w, clamped_h, radius, radius);
-  SetWindowRgn(hwnd, rgn, TRUE);
+  if (rgn) {
+    if (SetWindowRgn(hwnd, rgn, TRUE) == 0) {
+      ::DeleteObject(rgn);
+    }
+  }
 
   // Keep topmost active after region adjustment
   ::SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
@@ -190,6 +230,7 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
         int win_x = mi.rcMonitor.left + (mon_w - win_w) / 2;
         int win_y = mi.rcMonitor.top;
         SetWindowPos(hwnd, HWND_TOPMOST, win_x, win_y, win_w, win_h, SWP_NOACTIVATE);
+        last_input_dpi_ = 0;
         SetInputRegion(240, 24);
         return 0;
       }

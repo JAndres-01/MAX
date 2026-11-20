@@ -14,6 +14,9 @@ use state::AppState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 static ENGINE_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Starts the MAX LocalSend v2 engine inside a background Tokio runtime thread.
@@ -26,6 +29,9 @@ pub extern "C" fn max_core_start() -> i32 {
 
     std::thread::spawn(|| {
         let rt = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(4)
+            .thread_name("max-core-worker")
             .enable_all()
             .build()
         {

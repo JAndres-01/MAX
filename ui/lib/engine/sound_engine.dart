@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'max_engine_bridge.dart';
 
 class SoundEngine {
+  static const MethodChannel _windowChannel = MethodChannel('max/window');
   static String? _cachedSoundsDir;
 
   static String get soundsDir {
@@ -14,6 +16,23 @@ class SoundEngine {
         '/tmp';
     _cachedSoundsDir = p.join(home, '.config', 'max-drop', 'sounds');
     return _cachedSoundsDir!;
+  }
+
+  static String? _resolveSoundPath(String filename) {
+    final primary = p.join(soundsDir, filename);
+    if (File(primary).existsSync()) {
+      return primary;
+    }
+    if (Platform.isWindows) {
+      final appData = Platform.environment['APPDATA'];
+      if (appData != null && appData.isNotEmpty) {
+        final fallback = p.join(appData, 'max', 'max-drop', 'config', 'sounds', filename);
+        if (File(fallback).existsSync()) {
+          return fallback;
+        }
+      }
+    }
+    return null;
   }
 
   static void playSnap({MaxEngineBridge? bridge}) {
@@ -36,9 +55,8 @@ class SoundEngine {
     }
 
     try {
-      final wavPath = p.join(soundsDir, filename);
-      final wavFile = File(wavPath);
-      if (!wavFile.existsSync()) return;
+      final wavPath = _resolveSoundPath(filename);
+      if (wavPath == null) return;
 
       if (Platform.isLinux) {
         // Fast asynchronous execution with automated reaping to prevent defunct zombie processes
@@ -50,11 +68,11 @@ class SoundEngine {
           unawaited(Process.run('/usr/bin/aplay', ['-q', wavPath]));
         }
       } else if (Platform.isWindows) {
-        // Windows Media SoundPlayer via PowerShell async background
-        unawaited(Process.run(
-          'powershell',
-          ['-NoProfile', '-NonInteractive', '-c', "(New-Object Media.SoundPlayer '$wavPath').PlaySync()"],
-        ));
+        unawaited(
+          _windowChannel
+              .invokeMethod('playSound', {'path': wavPath})
+              .catchError((_) {}),
+        );
       }
     } catch (e) {
       debugPrint('SoundEngine notice: $e');

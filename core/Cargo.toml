@@ -35,3 +35,4 @@ directories = "5.0"
 rcgen = "0.13"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
+mimalloc = { version = "0.1", default-features = false }

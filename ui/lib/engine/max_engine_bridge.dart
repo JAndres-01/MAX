@@ -331,6 +331,7 @@ class MaxEngineBridge extends ChangeNotifier {
   AppConfigModel? currentConfig;
   List<TransferHistoryItemDto> history = [];
 
+  final http.Client _httpClient = http.Client();
   WebSocketChannel? _wsChannel;
   Timer? _reconnectTimer;
   Timer? _pollTimer;
@@ -401,6 +402,7 @@ class MaxEngineBridge extends ChangeNotifier {
   }
 
   void _scheduleReconnect() {
+    _wsChannel = null;
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(const Duration(seconds: 2), _connectEventStream);
   }
@@ -440,7 +442,7 @@ class MaxEngineBridge extends ChangeNotifier {
 
   Future<List<TransferHistoryItemDto>> fetchHistory() async {
     try {
-      final resp = await http
+      final resp = await _httpClient
           .get(Uri.parse('$_baseUrl/api/max/v1/history'))
           .timeout(const Duration(milliseconds: 900));
       if (resp.statusCode == 200) {
@@ -457,7 +459,7 @@ class MaxEngineBridge extends ChangeNotifier {
 
   Future<bool> clearHistory() async {
     try {
-      final resp = await http
+      final resp = await _httpClient
           .post(Uri.parse('$_baseUrl/api/max/v1/history/clear'))
           .timeout(const Duration(milliseconds: 900));
       if (resp.statusCode == 200) {
@@ -471,7 +473,7 @@ class MaxEngineBridge extends ChangeNotifier {
 
   Future<bool> openPath(String targetPath, {bool select = false}) async {
     try {
-      final resp = await http.post(
+      final resp = await _httpClient.post(
         Uri.parse('$_baseUrl/api/max/v1/open'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'path': targetPath, 'select': select}),
@@ -510,7 +512,7 @@ class MaxEngineBridge extends ChangeNotifier {
 
   Future<AppConfigModel?> fetchConfig() async {
     try {
-      final resp = await http
+      final resp = await _httpClient
           .get(Uri.parse('$_baseUrl/api/max/v1/config'))
           .timeout(const Duration(milliseconds: 900));
       if (resp.statusCode == 200) {
@@ -541,7 +543,7 @@ class MaxEngineBridge extends ChangeNotifier {
 
     bool httpOk = false;
     try {
-      final resp = await http
+      final resp = await _httpClient
           .post(
             Uri.parse('$_baseUrl/api/max/v1/config'),
             headers: {'Content-Type': 'application/json'},
@@ -573,7 +575,7 @@ class MaxEngineBridge extends ChangeNotifier {
       notifyListeners();
     }
     try {
-      await http.post(
+      await _httpClient.post(
         Uri.parse('$_baseUrl/api/max/v1/whitelist/remove'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'identifier': identifier}),
@@ -588,7 +590,7 @@ class MaxEngineBridge extends ChangeNotifier {
 
   Future<void> fetchPeers() async {
     try {
-      final resp = await http
+      final resp = await _httpClient
           .get(Uri.parse('$_baseUrl/api/max/v1/peers'))
           .timeout(const Duration(milliseconds: 900));
       if (resp.statusCode == 200) {
@@ -606,7 +608,7 @@ class MaxEngineBridge extends ChangeNotifier {
     required List<String> filePaths,
   }) async {
     try {
-      final resp = await http.post(
+      final resp = await _httpClient.post(
         Uri.parse('$_baseUrl/api/max/v1/send'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
@@ -628,7 +630,7 @@ class MaxEngineBridge extends ChangeNotifier {
     required bool trustAlways,
   }) async {
     try {
-      final resp = await http.post(
+      final resp = await _httpClient.post(
         Uri.parse('$_baseUrl/api/max/v1/respond'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
@@ -669,6 +671,7 @@ class MaxEngineBridge extends ChangeNotifier {
   @override
   void dispose() {
     _wsChannel?.sink.close();
+    _httpClient.close();
     _reconnectTimer?.cancel();
     _pollTimer?.cancel();
     super.dispose();

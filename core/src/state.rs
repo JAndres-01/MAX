@@ -112,8 +112,8 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
-        let (event_tx, _) = broadcast::channel(1024);
-        let (clipboard_ws_tx, _) = broadcast::channel(100);
+        let (event_tx, _) = broadcast::channel(128);
+        let (clipboard_ws_tx, _) = broadcast::channel(32);
         let history = AppConfig::load_history();
         Self {
             config: RwLock::new(config),
@@ -244,3 +244,26 @@ impl AppState {
         }
     }
 }
+
+/// Hints the OS on Windows to trim unused pages from the process working set
+/// after large file transfers or idle transitions.
+#[cfg(windows)]
+pub fn trim_working_set() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn SetProcessWorkingSetSize(
+            h_process: *mut std::ffi::c_void,
+            dw_minimum_working_set_size: usize,
+            dw_maximum_working_set_size: usize,
+        ) -> i32;
+    }
+
+    unsafe {
+        let proc_handle = GetCurrentProcess();
+        let _ = SetProcessWorkingSetSize(proc_handle, usize::MAX, usize::MAX);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn trim_working_set() {}

@@ -6,12 +6,56 @@ use futures_util::TryStreamExt;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tracing::info;
 use uuid::Uuid;
+
+static TRANSFER_HTTPS_CLIENT: OnceLock<Client> = OnceLock::new();
+static TRANSFER_HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+static SCAN_HTTPS_CLIENT: OnceLock<Client> = OnceLock::new();
+static SCAN_HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+
+fn build_client(
+    target_protocol: &str,
+    connect_timeout_ms: u64,
+    request_timeout_ms: Option<u64>,
+    tcp_keepalive_secs: Option<u64>,
+    max_idle_per_host: usize,
+    idle_timeout_secs: u64,
+) -> Client {
+    let mut builder = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .connect_timeout(Duration::from_millis(connect_timeout_ms))
+        .pool_max_idle_per_host(max_idle_per_host)
+        .pool_idle_timeout(Duration::from_secs(idle_timeout_secs));
+
+    if let Some(req_ms) = request_timeout_ms {
+        builder = builder.timeout(Duration::from_millis(req_ms));
+    }
+    if let Some(keepalive_s) = tcp_keepalive_secs {
+        builder = builder.tcp_keepalive(Duration::from_secs(keepalive_s));
+    }
+
+    if target_protocol == "https" {
+        let cert_dir = AppConfig::config_path()
+            .parent()
+            .unwrap_or(&PathBuf::from("/tmp"))
+            .join("certs");
+        if let Ok(tls_cfg) = get_or_create_tls_certs(cert_dir) {
+            let mut combined_pem = tls_cfg.cert_pem;
+            combined_pem.extend_from_slice(b"\n");
+            combined_pem.extend_from_slice(&tls_cfg.key_pem);
+            if let Ok(identity) = reqwest::Identity::from_pem(&combined_pem) {
+                builder = builder.identity(identity);
+            }
+        }
+    }
+
+    builder.build().unwrap_or_else(|_| Client::new())
+}
 
 fn collect_files_to_send(
     path: &PathBuf,
@@ -40,51 +84,27 @@ fn collect_files_to_send(
 }
 
 pub fn create_http_client(target_protocol: &str) -> reqwest::Client {
-    let mut builder = Client::builder()
-        .danger_accept_invalid_certs(true)
-        .connect_timeout(std::time::Duration::from_millis(2500))
-        .tcp_keepalive(std::time::Duration::from_secs(5));
-
     if target_protocol == "https" {
-        let cert_dir = AppConfig::config_path()
-            .parent()
-            .unwrap_or(&PathBuf::from("/tmp"))
-            .join("certs");
-        if let Ok(tls_cfg) = get_or_create_tls_certs(cert_dir) {
-            let mut combined_pem = tls_cfg.cert_pem;
-            combined_pem.extend_from_slice(b"\n");
-            combined_pem.extend_from_slice(&tls_cfg.key_pem);
-            if let Ok(identity) = reqwest::Identity::from_pem(&combined_pem) {
-                builder = builder.identity(identity);
-            }
-        }
+        TRANSFER_HTTPS_CLIENT
+            .get_or_init(|| build_client("https", 2500, None, Some(5), 2, 30))
+            .clone()
+    } else {
+        TRANSFER_HTTP_CLIENT
+            .get_or_init(|| build_client("http", 2500, None, Some(5), 2, 30))
+            .clone()
     }
-
-    builder.build().unwrap_or_else(|_| Client::new())
 }
 
 pub fn create_scan_client(target_protocol: &str) -> reqwest::Client {
-    let mut builder = Client::builder()
-        .danger_accept_invalid_certs(true)
-        .connect_timeout(std::time::Duration::from_millis(400))
-        .timeout(std::time::Duration::from_millis(800));
-
     if target_protocol == "https" {
-        let cert_dir = AppConfig::config_path()
-            .parent()
-            .unwrap_or(&PathBuf::from("/tmp"))
-            .join("certs");
-        if let Ok(tls_cfg) = get_or_create_tls_certs(cert_dir) {
-            let mut combined_pem = tls_cfg.cert_pem;
-            combined_pem.extend_from_slice(b"\n");
-            combined_pem.extend_from_slice(&tls_cfg.key_pem);
-            if let Ok(identity) = reqwest::Identity::from_pem(&combined_pem) {
-                builder = builder.identity(identity);
-            }
-        }
+        SCAN_HTTPS_CLIENT
+            .get_or_init(|| build_client("https", 400, Some(800), None, 1, 15))
+            .clone()
+    } else {
+        SCAN_HTTP_CLIENT
+            .get_or_init(|| build_client("http", 400, Some(800), None, 1, 15))
+            .clone()
     }
-
-    builder.build().unwrap_or_else(|_| Client::new())
 }
 
 pub async fn send_files(
@@ -225,14 +245,14 @@ pub async fn send_files(
 
         let reader_stream = ReaderStream::with_capacity(file, 65536);
         let mut file_bytes_sent: u64 = 0;
-        let mut last_emit = Instant::now() - std::time::Duration::from_millis(100);
+        let mut last_emit = Instant::now() - std::time::Duration::from_millis(160);
 
         let tracked_stream = reader_stream.inspect_ok(move |chunk| {
             file_bytes_sent += chunk.len() as u64;
             let now_sent = base_sent.saturating_add(file_bytes_sent);
             let is_done = now_sent >= total_all;
 
-            if is_done || last_emit.elapsed().as_millis() >= 60 {
+            if is_done || last_emit.elapsed().as_millis() >= 150 {
                 last_emit = Instant::now();
                 let elapsed = start_time.elapsed().as_secs_f64();
                 let speed = if elapsed > 0.0 {
@@ -312,6 +332,7 @@ pub async fn send_files(
         success: true,
     };
     state.record_history_item(history_item).await;
+    crate::state::trim_working_set();
 
     Ok(())
 }

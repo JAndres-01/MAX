@@ -338,7 +338,7 @@ async fn handle_upload(
         let _ = tokio::fs::create_dir_all(parent).await;
     }
 
-    let mut file = match File::create(&target_path).await {
+    let raw_file = match File::create(&target_path).await {
         Ok(f) => f,
         Err(e) => {
             return (
@@ -348,13 +348,14 @@ async fn handle_upload(
                 .into_response()
         }
     };
+    let mut file = tokio::io::BufWriter::with_capacity(131_072, raw_file);
 
     let recv_session_tag = format!("recv::{}::{}", sender_alias, query.session_id);
     let mut stream = body.into_data_stream();
     let mut bytes_written: u64 = 0;
     let file_total_bytes = file_meta.size;
     let total_all = total_session_bytes.max(file_total_bytes).max(1);
-    let mut last_emit = Instant::now() - std::time::Duration::from_millis(100);
+    let mut last_emit = Instant::now() - std::time::Duration::from_millis(160);
 
     let progress_file_name = if total_session_files > 1 {
         format!("{} ({}/{})", file_meta.file_name, current_file_idx, total_session_files)
@@ -419,7 +420,7 @@ async fn handle_upload(
 
                 let now_transferred = base_completed_bytes.saturating_add(bytes_written);
 
-                if bytes_written >= file_total_bytes || last_emit.elapsed().as_millis() >= 60 {
+                if bytes_written >= file_total_bytes || last_emit.elapsed().as_millis() >= 150 {
                     last_emit = Instant::now();
                     let elapsed = session_start_time.elapsed().as_secs_f64();
                     let speed = if elapsed > 0.0 {
@@ -526,6 +527,7 @@ async fn handle_upload(
     }
 
     let _ = file.flush().await;
+    drop(file);
 
     // Record history item for this specific file
     let target_path_str = target_path.to_string_lossy().to_string();
@@ -619,6 +621,8 @@ async fn handle_upload(
             .body(&body_text)
             .icon("document-save")
             .show();
+
+        crate::state::trim_working_set();
     } else {
         // More files still pending in this session!
         let completed_now = {
@@ -856,54 +860,303 @@ async fn handle_post_clipboard(
     (StatusCode::OK, Json(serde_json::json!({"success": true, "item": item}))).into_response()
 }
 
+struct DirectUploadStreamResult {
+    bytes_written: u64,
+    multipart_filename: Option<String>,
+    magic_prefix: [u8; 16],
+    magic_len: usize,
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn extract_boundary_from_content_type(content_type: &str) -> Option<String> {
+    for param in content_type.split(';').skip(1) {
+        let trimmed = param.trim();
+        if trimmed.len() > 9 && trimmed[..9].eq_ignore_ascii_case("boundary=") {
+            let val = trimmed[9..].trim().trim_matches('"').trim_matches('\'').trim();
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn extract_multipart_filename(header_part: &str) -> Option<String> {
+    let lower = header_part.to_ascii_lowercase();
+    if let Some(fn_pos) = lower.find("filename=") {
+        let fn_str = &header_part[fn_pos + 9..];
+        let fn_clean = fn_str.lines().next().unwrap_or("").trim_matches('"').trim_matches('\'').trim();
+        if !fn_clean.is_empty() {
+            let end_fn = fn_clean.find('"').or_else(|| fn_clean.find(';')).unwrap_or(fn_clean.len());
+            let parsed = fn_clean[..end_fn].trim();
+            if !parsed.is_empty() {
+                return Some(parsed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn append_magic_prefix(magic_prefix: &mut [u8; 16], magic_len: &mut usize, data: &[u8]) {
+    if *magic_len < 16 && !data.is_empty() {
+        let take = (16 - *magic_len).min(data.len());
+        magic_prefix[*magic_len..*magic_len + take].copy_from_slice(&data[..take]);
+        *magic_len += take;
+    }
+}
+
+async fn write_payload_chunk(
+    writer: &mut tokio::io::BufWriter<File>,
+    chunk: &[u8],
+    closing_marker: &[u8],
+    tail: &mut Vec<u8>,
+    closing_found: &mut bool,
+    magic_prefix: &mut [u8; 16],
+    magic_len: &mut usize,
+    bytes_written: &mut u64,
+) -> Result<(), (StatusCode, String)> {
+    if chunk.is_empty() || *closing_found {
+        return Ok(());
+    }
+
+    if closing_marker.is_empty() {
+        append_magic_prefix(magic_prefix, magic_len, chunk);
+        writer
+            .write_all(chunk)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Write error: {}", e)))?;
+        *bytes_written += chunk.len() as u64;
+        return Ok(());
+    }
+
+    tail.extend_from_slice(chunk);
+    if let Some(idx) = find_subslice(tail, closing_marker) {
+        let payload = &tail[..idx];
+        if !payload.is_empty() {
+            append_magic_prefix(magic_prefix, magic_len, payload);
+            writer
+                .write_all(payload)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Write error: {}", e)))?;
+            *bytes_written += payload.len() as u64;
+        }
+        tail.clear();
+        *closing_found = true;
+    } else if tail.len() >= closing_marker.len() {
+        let safe_len = tail.len() - (closing_marker.len() - 1);
+        let payload = &tail[..safe_len];
+        append_magic_prefix(magic_prefix, magic_len, payload);
+        writer
+            .write_all(payload)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Write error: {}", e)))?;
+        *bytes_written += safe_len as u64;
+        tail.drain(..safe_len);
+    }
+
+    Ok(())
+}
+
+async fn stream_direct_upload_to_file<S, E>(
+    mut stream: S,
+    content_type: &str,
+    dest_path: &std::path::Path,
+) -> Result<DirectUploadStreamResult, (StatusCode, String)>
+where
+    S: futures_util::Stream<Item = Result<axum::body::Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    let raw_file = File::create(dest_path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Create file error: {}", e)))?;
+    let mut writer = tokio::io::BufWriter::with_capacity(131_072, raw_file);
+
+    let header_is_multipart = content_type.trim().to_ascii_lowercase().starts_with("multipart/form-data");
+    let header_boundary = extract_boundary_from_content_type(content_type);
+
+    let mut probe_buf = Vec::<u8>::with_capacity(4096);
+    let mut header_end_pos: Option<usize> = None;
+    let mut stream_eof = false;
+
+    loop {
+        if header_is_multipart {
+            if let Some(pos) = find_subslice(&probe_buf, b"\r\n\r\n") {
+                header_end_pos = Some(pos);
+                break;
+            }
+        } else if probe_buf.len() >= 2 && !probe_buf.starts_with(b"--") {
+            break;
+        } else if probe_buf.starts_with(b"--") {
+            if let Some(pos) = find_subslice(&probe_buf, b"\r\n\r\n") {
+                let hdr_lower = String::from_utf8_lossy(&probe_buf[..pos]).to_ascii_lowercase();
+                if probe_buf.len() > 100
+                    || hdr_lower.contains("content-disposition")
+                    || hdr_lower.contains("filename=")
+                {
+                    header_end_pos = Some(pos);
+                    break;
+                }
+            }
+        }
+
+        if probe_buf.len() >= 8192 {
+            break;
+        }
+
+        match stream.next().await {
+            Some(Ok(chunk)) => probe_buf.extend_from_slice(&chunk),
+            Some(Err(e)) => {
+                return Err((StatusCode::BAD_REQUEST, format!("Stream error: {}", e)));
+            }
+            None => {
+                stream_eof = true;
+                break;
+            }
+        }
+    }
+
+    if probe_buf.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Empty body".to_string()));
+    }
+
+    let mut multipart_filename: Option<String> = None;
+    let mut closing_marker = Vec::<u8>::new();
+    let payload_start: usize;
+
+    if let Some(pos) = header_end_pos {
+        let header_part = String::from_utf8_lossy(&probe_buf[..pos]);
+        multipart_filename = extract_multipart_filename(&header_part);
+        if let Some(boundary) = header_boundary {
+            closing_marker = format!("\r\n--{}", boundary).into_bytes();
+        } else {
+            let first_line_end = find_subslice(&probe_buf[..pos], b"\n").unwrap_or(pos);
+            let mut first_line = &probe_buf[..first_line_end];
+            if first_line.ends_with(b"\r") {
+                first_line = &first_line[..first_line.len() - 1];
+            }
+            if first_line.starts_with(b"--") && first_line.len() > 2 {
+                closing_marker.extend_from_slice(b"\r\n");
+                closing_marker.extend_from_slice(first_line);
+            }
+        }
+        payload_start = pos + 4;
+    } else {
+        payload_start = 0;
+    }
+
+    let mut tail = Vec::<u8>::new();
+    let mut closing_found = false;
+    let mut magic_prefix = [0u8; 16];
+    let mut magic_len = 0usize;
+    let mut bytes_written = 0u64;
+
+    if payload_start < probe_buf.len() {
+        write_payload_chunk(
+            &mut writer,
+            &probe_buf[payload_start..],
+            &closing_marker,
+            &mut tail,
+            &mut closing_found,
+            &mut magic_prefix,
+            &mut magic_len,
+            &mut bytes_written,
+        )
+        .await?;
+    }
+    drop(probe_buf);
+
+    if !stream_eof {
+        while let Some(chunk_res) = stream.next().await {
+            let chunk = chunk_res
+                .map_err(|e| (StatusCode::BAD_REQUEST, format!("Stream error: {}", e)))?;
+            if !closing_found {
+                write_payload_chunk(
+                    &mut writer,
+                    &chunk,
+                    &closing_marker,
+                    &mut tail,
+                    &mut closing_found,
+                    &mut magic_prefix,
+                    &mut magic_len,
+                    &mut bytes_written,
+                )
+                .await?;
+            }
+        }
+    }
+
+    if !closing_marker.is_empty() && !closing_found && !tail.is_empty() {
+        append_magic_prefix(&mut magic_prefix, &mut magic_len, &tail);
+        writer
+            .write_all(&tail)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Write error: {}", e)))?;
+        bytes_written += tail.len() as u64;
+    }
+
+    writer
+        .flush()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Flush error: {}", e)))?;
+    drop(writer);
+
+    if bytes_written == 0 {
+        return Err((StatusCode::BAD_REQUEST, "Empty body".to_string()));
+    }
+
+    Ok(DirectUploadStreamResult {
+        bytes_written,
+        multipart_filename,
+        magic_prefix,
+        magic_len,
+    })
+}
+
 async fn handle_direct_upload(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Query(params): Query<HashMap<String, String>>,
     headers: axum::http::HeaderMap,
-    body: axum::body::Bytes,
+    body: Body,
 ) -> impl IntoResponse {
-    info!("handle_direct_upload received request from {} ({} bytes)", addr, body.len());
+    info!("handle_direct_upload streaming request from {}", addr);
     let download_dir = {
         let cfg = state.config.read().await;
         cfg.download_dir.clone()
     };
 
-    if body.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Empty body"}))).into_response();
-    }
-
-    let mut file_bytes = body;
-    let mut multipart_filename = None;
-
     let content_type = headers.get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream");
 
-    if content_type.starts_with("multipart/form-data") || (file_bytes.starts_with(b"--") && file_bytes.len() > 100) {
-        if let Some(pos) = file_bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-            let header_part = String::from_utf8_lossy(&file_bytes[..pos]);
-            if let Some(fn_pos) = header_part.find("filename=") {
-                let fn_str = &header_part[fn_pos + 9..];
-                let fn_clean = fn_str.lines().next().unwrap_or("").trim_matches('"').trim_matches('\'').trim();
-                if !fn_clean.is_empty() {
-                    let end_fn = fn_clean.find('"').or_else(|| fn_clean.find(';')).unwrap_or(fn_clean.len());
-                    multipart_filename = Some(fn_clean[..end_fn].trim().to_string());
-                }
-            }
-
-            let data_start = pos + 4;
-            let data_end = if let Some(end_pos) = file_bytes[data_start..].windows(4).position(|w| w == b"\r\n--") {
-                data_start + end_pos
-            } else {
-                file_bytes.len()
-            };
-
-            if data_end > data_start {
-                file_bytes = file_bytes.slice(data_start..data_end);
-            }
-        }
+    let download_dir_path = PathBuf::from(&download_dir);
+    if let Err(e) = tokio::fs::create_dir_all(&download_dir_path).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Create dir error: {}", e)})),
+        )
+            .into_response();
     }
+
+    let temp_path = download_dir_path.join(format!(".max_upload_{}.tmp", Uuid::new_v4()));
+    let stream = body.into_data_stream();
+
+    let upload_res = match stream_direct_upload_to_file(stream, content_type, &temp_path).await {
+        Ok(res) => res,
+        Err((status, msg)) => {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return (status, Json(serde_json::json!({"error": msg}))).into_response();
+        }
+    };
+
+    let total_written = upload_res.bytes_written;
+    let multipart_filename = upload_res.multipart_filename;
 
     // 1. Determine filename and extension
     let filename_param = params.get("filename").or_else(|| params.get("name")).cloned();
@@ -925,7 +1178,8 @@ async fn handle_direct_upload(
             None
         });
 
-    let (magic_ext, magic_category) = detect_extension_from_magic_bytes(&file_bytes);
+    let (magic_ext, magic_category) =
+        detect_extension_from_magic_bytes(&upload_res.magic_prefix[..upload_res.magic_len]);
 
     let header_ext = match content_type {
         "image/jpeg" | "image/jpg" => "jpg",
@@ -964,15 +1218,18 @@ async fn handle_direct_upload(
         final_name = format!("{}.{}", final_name, best_ext);
     }
 
-    let download_dir_path = PathBuf::from(&download_dir);
     let target_path = sanitize_destination_path(&download_dir_path, &final_name);
 
-    if let Err(e) = tokio::fs::write(&target_path, &file_bytes).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Write error: {}", e)})),
-        )
-            .into_response();
+    if tokio::fs::rename(&temp_path, &target_path).await.is_err() {
+        if let Err(e) = tokio::fs::copy(&temp_path, &target_path).await {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Write error: {}", e)})),
+            )
+                .into_response();
+        }
+        let _ = tokio::fs::remove_file(&temp_path).await;
     }
 
     // Resolve friendly device name
@@ -1039,7 +1296,7 @@ async fn handle_direct_upload(
         id: uuid::Uuid::new_v4().to_string(),
         file_name: file_display_name.to_string(),
         file_path: Some(target_path_str),
-        file_size: file_bytes.len() as u64,
+        file_size: total_written,
         is_incoming: true,
         device_alias: device_name.clone(),
         timestamp: std::time::SystemTime::now()
@@ -1049,12 +1306,13 @@ async fn handle_direct_upload(
         success: true,
     };
     state.record_history_item(history_item).await;
+    crate::state::trim_working_set();
 
     (StatusCode::OK, Json(serde_json::json!({
         "success": true,
         "filename": file_display_name,
         "path": target_path.to_string_lossy(),
-        "size": file_bytes.len()
+        "size": total_written
     }))).into_response()
 }
 
@@ -1637,6 +1895,109 @@ async fn handle_max_events_socket(mut socket: axum::extract::ws::WebSocket, stat
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Bytes;
+    use futures_util::stream;
+    use std::convert::Infallible;
+
+    #[tokio::test]
+    async fn streams_multipart_upload_with_split_boundary_across_chunks() {
+        let temp_dir = std::env::temp_dir().join(format!("max_test_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let dest = temp_dir.join("out.png");
+
+        let boundary = "----WebKitBoundaryTest123";
+        let payload: Vec<u8> = b"\x89PNG\r\n\x1a\nhello\r\n--not-end\r\nworld".to_vec();
+        let mut full_body = Vec::new();
+        full_body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"photo.png\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        full_body.extend_from_slice(&payload);
+        full_body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        // Split into tiny 5-byte chunks so headers and closing boundary cross chunk boundaries.
+        let chunks: Vec<Result<Bytes, Infallible>> = full_body
+            .chunks(5)
+            .map(|c| Ok(Bytes::copy_from_slice(c)))
+            .collect();
+
+        let content_type = format!("multipart/form-data; boundary=\"{boundary}\"");
+        let res = stream_direct_upload_to_file(stream::iter(chunks), &content_type, &dest)
+            .await
+            .expect("streaming multipart upload should succeed");
+
+        assert_eq!(res.multipart_filename.as_deref(), Some("photo.png"));
+        assert_eq!(res.bytes_written, payload.len() as u64);
+        assert_eq!(
+            detect_extension_from_magic_bytes(&res.magic_prefix[..res.magic_len]),
+            ("png", "Image")
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn streams_raw_binary_upload_without_multipart() {
+        let temp_dir = std::env::temp_dir().join(format!("max_test_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let dest = temp_dir.join("raw.pdf");
+
+        let payload = b"%PDF-1.7\n--some comment inside raw stream\n%%EOF".to_vec();
+        let chunks: Vec<Result<Bytes, Infallible>> = payload
+            .chunks(7)
+            .map(|c| Ok(Bytes::copy_from_slice(c)))
+            .collect();
+
+        let res = stream_direct_upload_to_file(
+            stream::iter(chunks),
+            "application/pdf",
+            &dest,
+        )
+        .await
+        .expect("streaming raw upload should succeed");
+
+        assert_eq!(res.multipart_filename, None);
+        assert_eq!(res.bytes_written, payload.len() as u64);
+        assert_eq!(
+            detect_extension_from_magic_bytes(&res.magic_prefix[..res.magic_len]),
+            ("pdf", "Document")
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn streams_short_raw_payload_starting_with_dashes() {
+        let temp_dir = std::env::temp_dir().join(format!("max_test_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let dest = temp_dir.join("short.txt");
+
+        let payload = b"-- markdown horizontal rule\n\nhello".to_vec();
+        let chunks: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from(payload.clone()))];
+
+        let res = stream_direct_upload_to_file(
+            stream::iter(chunks),
+            "text/plain",
+            &dest,
+        )
+        .await
+        .expect("short raw upload starting with -- should not be parsed as multipart");
+
+        assert_eq!(res.multipart_filename, None);
+        assert_eq!(res.bytes_written, payload.len() as u64);
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
 

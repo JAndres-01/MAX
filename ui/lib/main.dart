@@ -11,8 +11,8 @@ import 'settings_main.dart';
 
 void main(List<String> args) {
   WidgetsFlutterBinding.ensureInitialized();
-  PaintingBinding.instance.imageCache.maximumSizeBytes = 12 * 1024 * 1024;
-  PaintingBinding.instance.imageCache.maximumSize = 25;
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 4 * 1024 * 1024;
+  PaintingBinding.instance.imageCache.maximumSize = 10;
   if (args.contains('--settings')) {
     runApp(const MaxSettingsApp());
   } else {
@@ -375,15 +375,27 @@ class _MaxNotchShellState extends State<MaxNotchShell>
 
   /// Controls the physical unfolding/retraction of the panel from the top strip
   late final AnimationController _morphController;
-  late final Animation<double> _morphHeightFactor;
-  late final Animation<double> _morphWidthFactor;
-  late final Animation<double> _morphContentOpacity;
+  late final CurvedAnimation _morphHeightFactor;
+  late final CurvedAnimation _morphWidthFactor;
+  late final CurvedAnimation _morphContentOpacity;
 
   /// Controls the subtle pulse on the Nothing OS matrix progress bar
   late final AnimationController _matrixPulseController;
 
   Timer? _autoHideTimer;
   Timer? _completionHoldTimer;
+  Timer? _trimMemoryTimer;
+
+  void _scheduleMemoryTrim() {
+    if (!Platform.isWindows) return;
+    _trimMemoryTimer?.cancel();
+    _trimMemoryTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (!mounted || _mode != NotchMode.idle || !_morphController.isDismissed) {
+        return;
+      }
+      _windowChannel.invokeMethod('trimMemory').catchError((_) {});
+    });
+  }
 
   void _updateQueueEdgeFades() {
     if (!mounted) return;
@@ -470,14 +482,11 @@ class _MaxNotchShellState extends State<MaxNotchShell>
       vsync: this,
       duration: const Duration(milliseconds: 210),
       reverseDuration: const Duration(milliseconds: 170),
-    )
-      ..addListener(() {
-        setState(() {});
-      })
-      ..addStatusListener((status) {
+    )..addStatusListener((status) {
         if (status == AnimationStatus.dismissed && _mode == NotchMode.idle) {
           _syncInputRegion();
           setState(() {});
+          _scheduleMemoryTrim();
         }
       });
 
@@ -535,10 +544,14 @@ class _MaxNotchShellState extends State<MaxNotchShell>
     _queueScrollController.removeListener(_updateQueueEdgeFades);
     _queueScrollController.dispose();
     _hoverHoldController.dispose();
+    _morphHeightFactor.dispose();
+    _morphWidthFactor.dispose();
+    _morphContentOpacity.dispose();
     _morphController.dispose();
     _matrixPulseController.dispose();
     _autoHideTimer?.cancel();
     _completionHoldTimer?.cancel();
+    _trimMemoryTimer?.cancel();
     _bridge.removeListener(_onBridgeUpdate);
     _bridge.dispose();
     super.dispose();
@@ -551,6 +564,7 @@ class _MaxNotchShellState extends State<MaxNotchShell>
 
   void _openPanelWithMode(NotchMode targetMode) {
     _autoHideTimer?.cancel();
+    _trimMemoryTimer?.cancel();
     _hoverHoldController.reset();
     setState(() {
       _setMode(targetMode, activeContentMode: targetMode);
@@ -954,9 +968,7 @@ class _MaxNotchShellState extends State<MaxNotchShell>
 
   /// Single unified container that physically unfolds from and retracts into the top strip.
   Widget _buildUnifiedMorphingNotch() {
-    final double morphT = _morphController.value;
-
-    if (morphT <= 0.001 && _mode == NotchMode.idle) {
+    if (_mode == NotchMode.idle && _morphController.isDismissed) {
       return Container(
         width: 240,
         height: 24,
@@ -971,23 +983,68 @@ class _MaxNotchShellState extends State<MaxNotchShell>
     final double expandedWidth = _targetExpandedWidth(displayMode);
     final double stripBaseWidth =
         _bridge.currentConfig?.notchIdleWidth ?? 144.0;
-    final double currentWidth = lerpDouble(
-      stripBaseWidth,
-      expandedWidth,
-      _morphWidthFactor.value,
-    )!;
-    final double bottomRadius =
-        lerpDouble(4.0, 16.0, _morphHeightFactor.value)!;
 
-    return ClipRRect(
-      borderRadius: BorderRadius.vertical(
-        bottom: Radius.circular(bottomRadius),
+    final Widget expandedContent = FadeTransition(
+      opacity: _morphContentOpacity,
+      child: AnimatedSize(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutQuart,
+        alignment: Alignment.topCenter,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            18,
+            displayMode == NotchMode.transferring ||
+                    displayMode == NotchMode.completed
+                ? 12
+                : 13,
+            18,
+            displayMode == NotchMode.transferring ||
+                    displayMode == NotchMode.completed
+                ? 14
+                : 16,
+          ),
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 170),
+            switchInCurve: Curves.easeOutQuart,
+            switchOutCurve: Curves.easeInCubic,
+            transitionBuilder: (child, animation) {
+              final slide = Tween<Offset>(
+                begin: const Offset(0.0, -0.10),
+                end: Offset.zero,
+              ).animate(animation);
+              return FadeTransition(
+                opacity: animation,
+                child: SlideTransition(
+                  position: slide,
+                  child: SizeTransition(
+                    sizeFactor: animation,
+                    axis: Axis.vertical,
+                    alignment: Alignment.topCenter,
+                    child: child,
+                  ),
+                ),
+              );
+            },
+            child: _buildModeContent(displayMode),
+          ),
+        ),
       ),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOutQuart,
+    );
+
+    return AnimatedBuilder(
+      animation: _morphController,
+      child: expandedContent,
+      builder: (context, contentChild) {
+        final double morphT = _morphController.value;
+        final double heightT = _morphHeightFactor.value.clamp(0.0, 1.0);
+        final double currentWidth = lerpDouble(
+          stripBaseWidth,
+          expandedWidth,
+          _morphWidthFactor.value,
+        )!;
+        final double bottomRadius = lerpDouble(4.0, 16.0, heightT)!;
+
+        return Container(
           width: currentWidth,
           decoration: BoxDecoration(
             color: const Color(0xF509090B),
@@ -997,20 +1054,18 @@ class _MaxNotchShellState extends State<MaxNotchShell>
             border: Border.all(
               color: _isDraggingOver
                   ? Colors.white.withValues(alpha: 0.9)
-                  : Colors.white.withValues(
-                      alpha: lerpDouble(0.0, 0.16, _morphHeightFactor.value)!,
-                    ),
+                  : Colors.white.withValues(alpha: 0.16 * heightT),
               width: 1.0,
             ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(
-                  alpha: 0.72 * _morphHeightFactor.value,
-                ),
-                blurRadius: 24 * _morphHeightFactor.value,
-                offset: Offset(0, 10 * _morphHeightFactor.value),
-              ),
-            ],
+            boxShadow: morphT >= 0.999
+                ? const [
+                    BoxShadow(
+                      color: Color(0xB8000000),
+                      blurRadius: 18,
+                      offset: Offset(0, 8),
+                    ),
+                  ]
+                : null,
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -1019,118 +1074,83 @@ class _MaxNotchShellState extends State<MaxNotchShell>
               ClipRect(
                 child: Align(
                   alignment: Alignment.topCenter,
-                  heightFactor: _morphHeightFactor.value.clamp(0.0, 1.0),
-                  child: Opacity(
-                    opacity: _morphContentOpacity.value.clamp(0.0, 1.0),
-                    child: Transform.translate(
-                      offset: Offset(
-                        0,
-                        -8.0 * (1.0 - _morphHeightFactor.value),
-                      ),
-                      child: AnimatedSize(
-                        duration: const Duration(milliseconds: 180),
-                        curve: Curves.easeOutQuart,
-                        alignment: Alignment.topCenter,
-                        child: Padding(
-                          padding: EdgeInsets.fromLTRB(
-                            18,
-                            displayMode == NotchMode.transferring ||
-                                    displayMode == NotchMode.completed
-                                ? 12
-                                : 13,
-                            18,
-                            displayMode == NotchMode.transferring ||
-                                    displayMode == NotchMode.completed
-                                ? 14
-                                : 16,
-                          ),
-                          child: AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 170),
-                            switchInCurve: Curves.easeOutQuart,
-                            switchOutCurve: Curves.easeInCubic,
-                            transitionBuilder: (child, animation) {
-                              final slide = Tween<Offset>(
-                                begin: const Offset(0.0, -0.10),
-                                end: Offset.zero,
-                              ).animate(animation);
-                              return FadeTransition(
-                                opacity: animation,
-                                child: SlideTransition(
-                                  position: slide,
-                                  child: SizeTransition(
-                                    sizeFactor: animation,
-                                    axis: Axis.vertical,
-                                    alignment: Alignment.topCenter,
-                                    child: child,
-                                  ),
-                                ),
-                              );
-                            },
-                            child: _buildModeContent(displayMode),
-                          ),
-                        ),
-                      ),
+                  heightFactor: heightT,
+                  child: Transform.translate(
+                    offset: Offset(
+                      0,
+                      -8.0 * (1.0 - heightT),
                     ),
+                    child: contentChild,
                   ),
                 ),
               ),
             ],
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
   /// Monochrome Nothing OS White/Silver top strip (zero blue).
   Widget _buildTopStripSpine({required bool isExpanded}) {
-    return AnimatedBuilder(
-      animation: _hoverHoldController,
-      builder: (context, _) {
-        final isCharging = _hoverHoldController.value > 0.0;
-        final double baseW = _bridge.currentConfig?.notchIdleWidth ?? 144.0;
-        final double width =
-            isExpanded ? double.infinity : (isCharging ? baseW + 36.0 : baseW);
-        final double height = isExpanded ? 1.5 : (isCharging ? 4.0 : 3.0);
+    if (isExpanded) {
+      return const SizedBox(
+        width: double.infinity,
+        height: 1.5,
+        child: ColoredBox(color: Color(0x24FFFFFF)),
+      );
+    }
 
-        return AnimatedContainer(
-          duration: const Duration(milliseconds: 140),
-          curve: Curves.easeOutQuart,
-          width: width,
-          height: height,
-          decoration: BoxDecoration(
-            color: isExpanded
-                ? Colors.white.withValues(alpha: 0.14)
-                : Colors.white.withValues(alpha: isCharging ? 0.35 : 0.52),
-            borderRadius: isExpanded
-                ? BorderRadius.zero
-                : const BorderRadius.vertical(bottom: Radius.circular(4)),
-            boxShadow: isExpanded
-                ? null
-                : [
-                    BoxShadow(
-                      color: Colors.white.withValues(
-                        alpha: isCharging ? 0.65 : 0.25,
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: _hoverHoldController,
+        builder: (context, _) {
+          final isCharging = _hoverHoldController.value > 0.0;
+          final double baseW = _bridge.currentConfig?.notchIdleWidth ?? 144.0;
+          final double width = isCharging ? baseW + 36.0 : baseW;
+          final double height = isCharging ? 4.0 : 3.0;
+
+          return Container(
+            width: width,
+            height: height,
+            decoration: BoxDecoration(
+              color: isCharging
+                  ? const Color(0x59FFFFFF)
+                  : const Color(0x85FFFFFF),
+              borderRadius: const BorderRadius.vertical(
+                bottom: Radius.circular(4),
+              ),
+              boxShadow: isCharging
+                  ? const [
+                      BoxShadow(
+                        color: Color(0xA6FFFFFF),
+                        blurRadius: 8,
                       ),
-                      blurRadius: isCharging ? 10 : 5,
-                    ),
-                  ],
-          ),
-          alignment: Alignment.center,
-          child: !isExpanded && isCharging
-              ? FractionallySizedBox(
-                  widthFactor: _hoverHoldController.value,
-                  child: Container(
-                    decoration: const BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.vertical(
-                        bottom: Radius.circular(4),
+                    ]
+                  : const [
+                      BoxShadow(
+                        color: Color(0x40FFFFFF),
+                        blurRadius: 5,
+                      ),
+                    ],
+            ),
+            alignment: Alignment.center,
+            child: isCharging
+                ? FractionallySizedBox(
+                    widthFactor: _hoverHoldController.value,
+                    child: const DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.vertical(
+                          bottom: Radius.circular(4),
+                        ),
                       ),
                     ),
-                  ),
-                )
-              : null,
-        );
-      },
+                  )
+                : null,
+          );
+        },
+      ),
     );
   }
 
@@ -1328,28 +1348,31 @@ class _MaxNotchShellState extends State<MaxNotchShell>
               : Colors.white.withValues(alpha: 0.12),
         ),
       ),
-      child: CustomPaint(
-        painter: _NothingDotMatrixPainter(),
-        child: Center(
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              _MaxVectorIcon(
-                type: MaxIconType.plus,
-                size: 13,
-                color: Colors.white.withValues(alpha: 0.75),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                'ARRASTRA ARCHIVOS AQUI',
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.68),
-                  fontSize: 10.5,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 1.4,
+      child: RepaintBoundary(
+        child: CustomPaint(
+          painter: const _NothingDotMatrixPainter(),
+          isComplex: true,
+          child: Center(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _MaxVectorIcon(
+                  type: MaxIconType.plus,
+                  size: 13,
+                  color: Colors.white.withValues(alpha: 0.75),
                 ),
-              ),
-            ],
+                const SizedBox(width: 8),
+                Text(
+                  'ARRASTRA ARCHIVOS AQUI',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.68),
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 1.4,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -1966,36 +1989,38 @@ class _MaxNotchShellState extends State<MaxNotchShell>
           ],
         ),
         const SizedBox(height: 11),
-        AnimatedBuilder(
-          animation: _matrixPulseController,
-          builder: (context, _) {
-            return SizedBox(
-              height: 8,
-              child: Row(
-                children: List.generate(totalSegments, (idx) {
-                  final bool isLit = idx < activeSegments;
-                  final bool isWaitingStart =
-                      activeSegments == 0 && idx == 0;
-                  final bool isLeadingEdge =
-                      idx == activeSegments - 1 || isWaitingStart;
-                  final double alpha = (isLit || isWaitingStart)
-                      ? (isLeadingEdge
-                          ? 0.45 + (_matrixPulseController.value * 0.55)
-                          : 1.0)
-                      : 0.14;
-                  return Expanded(
-                    child: Container(
-                      margin: const EdgeInsets.symmetric(horizontal: 1.1),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: alpha),
-                        borderRadius: BorderRadius.circular(1.5),
+        RepaintBoundary(
+          child: AnimatedBuilder(
+            animation: _matrixPulseController,
+            builder: (context, _) {
+              return SizedBox(
+                height: 8,
+                child: Row(
+                  children: List.generate(totalSegments, (idx) {
+                    final bool isLit = idx < activeSegments;
+                    final bool isWaitingStart =
+                        activeSegments == 0 && idx == 0;
+                    final bool isLeadingEdge =
+                        idx == activeSegments - 1 || isWaitingStart;
+                    final double alpha = (isLit || isWaitingStart)
+                        ? (isLeadingEdge
+                            ? 0.45 + (_matrixPulseController.value * 0.55)
+                            : 1.0)
+                        : 0.14;
+                    return Expanded(
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 1.1),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: alpha),
+                          borderRadius: BorderRadius.circular(1.5),
+                        ),
                       ),
-                    ),
-                  );
-                }),
-              ),
-            );
-          },
+                    );
+                  }),
+                ),
+              );
+            },
+          ),
         ),
         if (_transferTotalFiles > 1) ...[
           const SizedBox(height: 8),
@@ -2524,6 +2549,8 @@ class _MaxVectorIconPainter extends CustomPainter {
 
 /// Paints a subtle Nothing OS dot-matrix background grid inside the empty drop zone.
 class _NothingDotMatrixPainter extends CustomPainter {
+  const _NothingDotMatrixPainter();
+
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
